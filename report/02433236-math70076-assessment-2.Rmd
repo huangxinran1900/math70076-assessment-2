@@ -1,0 +1,318 @@
+---
+title: "WHR_main"
+output: pdf_document
+date: "2024-05-08"
+---
+
+```{r setup, echo=FALSE}
+library(readxl)                 # loading data
+library(dplyr)                  # data frame manipulation
+library(stringr)                # character string manipulation
+library(ggplot2)                # making plots
+library(ggtext)               
+library(forcats)
+library(grid)
+library(shadowtext)
+library(tibble)
+library(tidyr)
+library(gridExtra)
+# model package
+library(glmnet)                 #lasso regression
+library(randomForest)           #Random Forest
+library(caret)
+library(class)
+```
+
+# Introduction
+The World Happiness Report, annually published by the WHR editorial board, offers a concrete method to evaluate the extent of happiness across various countries. The happiness score is based on a metric called Cantril Ladder, which asks the survey respondents to evaluate their current life satisfaction and happiness from 0 to 10 - where 0 represents the worst life evaluation and 10 represents the best possible life. In particular, we focus on the World Happiness Report from 2022 to 2024 to figure out the association between the ladder score and social factors within a country that are expected to contribute to the satisfaction of individual's happiness evaluation. By predicting the happiness score from different factors, we can gain insights into global life satisfaction. This gives government feasible directions to make policy decisions to enhance well-being and enables international organizations to assess their global work.
+
+```{r process, echo=FALSE, message=FALSE, warning=FALSE}
+url_22 <- 'https://raw.githubusercontent.com/huangxinran1900/final_project/main/raw/WHR_2022.csv'
+url_23 <- 'https://raw.githubusercontent.com/huangxinran1900/final_project/main/raw/WHR_2023.csv'
+url_24 <- 'https://raw.githubusercontent.com/huangxinran1900/final_project/main/raw/WHR_2024.csv'
+
+whr_22_raw <- readr::read_csv(file = url_22)
+whr_23_raw <- readr::read_csv(file = url_23)
+whr_24_raw <- readr::read_csv(file = url_24)
+
+# Rename the columns of 2024 (different from other datasets)
+whr_24_renamed <- whr_24_raw %>% 
+  rename(country = "Country name") %>% 
+  rename(happiness_score = "Ladder score") %>% 
+  rename(gdp_per_capita = "Explained by: Log GDP per capita") %>% # All columns in these datasets represent log GDP per capita
+  rename(social_support = "Explained by: Social support") %>%
+  rename(healthy_life_expectancy = "Explained by: Healthy life expectancy") %>%
+  rename(freedom_to_make_life_choices = "Explained by: Freedom to make life choices") %>%
+  rename(generosity = "Explained by: Generosity") %>%
+  rename(perceptions_of_corruption = "Explained by: Perceptions of corruption")
+
+# missing values and select needed columns (2024 has missing column: region)
+filter_na <- function(df){
+  col_keep <- c("country", "happiness_score", "gdp_per_capita", "social_support", "healthy_life_expectancy", "freedom_to_make_life_choices", "generosity", "perceptions_of_corruption")
+  if("region" %in% names(df)){
+    col_keep <- c(col_keep, "region")
+  }
+  df %>%
+    filter(!if_any(everything(), is.na))%>%
+    select(col_keep)
+}
+
+filtered_22 <- filter_na(whr_22_raw)
+filtered_23 <- filter_na(whr_23_raw)
+filtered_24 <- filter_na(whr_24_renamed)
+
+# Five datasets over 2020-2024 collect data from different number of countries
+# Keep the rows with countries including in all five datasets
+intersect_country <- intersect(intersect(filtered_22$country,filtered_23$country),
+                                                   filtered_24$country)
+# Also add a column: year
+filter_country <- function(df, year){df %>%
+    filter(country %in% intersect_country) %>%
+    mutate(year = year)
+}
+
+filtered_22 <- filter_country(filtered_22, 2022)
+filtered_23 <- filter_country(filtered_23, 2023)
+filtered_24 <- filter_country(filtered_24, 2024)
+
+# Assign region column to filtered_24
+filtered_24 <- filtered_24 %>%
+  left_join(filtered_23 %>% 
+              select(country, region), by="country")
+
+# Here, merge three datasets together
+merged_2224 <- filtered_22 %>%
+  bind_rows(filtered_23) %>%
+  bind_rows(filtered_24)
+
+```
+
+# Data
+## Data collection
+In this data science report, the world happiness datasets from 2022 to 2024 were collected directly from the survey results of the Gallup World Poll. The datasets also include six social and economic factors with continuous values for our further investigation. The values of each factor are calculated by comparing to the states of Dystopia (represents the worst possible conditions of six variables):
+
+* Social Support: The extent of social support available to an individual.
+* Perceptions of Corruption: Public responses to the corruption, which reflects people's confidence to their government.
+* Healthy Life Expectancy: The expectance of living in a healthy life.
+* Generosity: The generosity among the population, higher values indicate more common altruistic behaviours among population.
+* GDP: Measure of the economic health of a country.
+* Freedom to Make Life Choices: The extent of personal freedom in daily lives.
+
+## Data processing
+The datasets of 2022 and 2023 share an identical data structure then the dataset of 2024 was preprocessed to align the same column names with those in other two datasets. There are different number of rows in three datasets (145 in 2022 dataset, 137 in 2023 dataset, 143 in 2024 dataset) indicating that different countries were researched across three years. Then after removing rows with missing values presenting in one row in the 2023 dataset and three rows in the 2024 dataset, the datasets retained the rows common to all three years, resulting in 131 rows per dataset. To provide an initial glimpse of the world happiness scores globally, we can then add a column specifying the region of each country to 2024 dataset following the country region in 2022 and 2023 datasets. By calculating the average scores of 10 regions each year, we can notice that North America, Australia, New Zealand and Western Europe reach the highest average happiness scores each year while South Asia shows the lowest average happiness scores but also an increasing trend across three years.
+
+```{r plot1, echo=FALSE}
+# Plot 1: average happiness scores over regions from 2022-2024
+# Calculate the mean score in groups region and year
+avg_score <- merged_2224%>%
+  group_by(region, year)%>%
+  summarize(avg_score=mean(happiness_score))%>%
+  ungroup()
+
+avg_score %>%
+  ggplot(aes(x=avg_score, y=region, fill=as.factor(year)))+
+  geom_bar(stat = "identity", position = position_dodge(), width = 0.7) +
+  theme_minimal()+
+  theme(
+    axis.text.y = element_text(angle=45, hjust=1),
+    axis.title.y = element_blank(),
+    axis.line.y.left = element_line(color = "black"),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "bottom")+
+  scale_fill_manual(values=c("#98DAFF", "#006BA2", "#E7B030"))+
+  scale_x_continuous(expand = c(0, 0)) +  # eliminate space at the root of the bars
+  labs(title = "Average Happiness scores over regions",
+       x="Happiness score",
+       fill="Year")
+```
+
+To select the most significant features for happiness score model, we can first compute the correlations between variables and plot the correlation matrix in \ref{fig:cor}. The variable year has almost no correlation to the happiness score as expected, then we can use the merged dataset from 2022 to 2024 for predictions. Additionally, the correlation coefficient between generosity and the happiness score is also very small (0.05). Also, it can be noticed from the correlation plot that there are moderate strong positive correlations between healthy life expectancy and GDP (0.71) and social support and GDP (0.69). For further verification, we will perform Lasso regression to find the most predictive features and make reliable estimates even in the presence of multilinearity by penalizing the coefficients. The social support and GDP of a country shows a strong correlation with the happiness scores.
+
+```{r cor, echo=FALSE, fig.cap = "\\label{fig:cor} Correlation matrix.", out.width='70%'}
+# Plot 2: Correlation matrix
+merged_2224_numeric <- merged_2224[, sapply(merged_2224, is.numeric)]
+correlation <- cor(merged_2224_numeric)
+# Tidy form of the dataset
+tidy_cor <- correlation %>%
+  as.data.frame() %>%
+  rownames_to_column("Variable1") %>%
+  pivot_longer(cols = -Variable1, names_to="Variable2", values_to="Correlation")
+
+cor_plt <- tidy_cor %>%
+  ggplot(aes(x=Variable1, y=Variable2, fill=Correlation))+
+  geom_tile() +
+  geom_text(aes(label = sprintf("%.2f", Correlation)), color = "black")+ # Add the exact correlations to each block
+  scale_fill_gradient2(high="red", midpoint = 0)+
+  theme_minimal()+
+  theme(
+    axis.text.x = element_text(angle=45, hjust=1), # the labels in x-axis are too long and cover each other, then rotate for better visualisation
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank() #hide axis labels 
+  )+
+  labs(title="Correlation matrix of World Happiness Report in 2024")
+
+# The happiness score has little to do with year as expected, then our models will mainly focus on the dataset of 2024
+cor_plt
+```
+
+# Methods
+The merged dataset is split into training sets (80\%) and test sets (20\%). After constructing the model and finding the optimal hyperparameters, the predictions are made on test set to check the model performance.
+
+```{r split, echo=FALSE}
+# The data is split into 80% training sets and 20% test sets
+set.seed(257)
+num_data <- nrow(merged_2224)
+train_size <- 0.8*num_data
+train_indices <- sample(1:num_data, train_size)
+train_set <- merged_2224[train_indices,]
+test_set <- merged_2224[-train_indices,]
+# delete the year, region and country column
+train_set <- subset(train_set, select = -c(year, region, country))
+test_set <- subset(test_set, select = -c(year, region, country))
+```
+
+## Lasso Regression
+We first construct a Lasso Regression model, which adds a penalty term to the ordinary least squares model. Since the happiness score appears to have little correlation to the population generosity, the Lasso Regression model can penalizes the less important features. Lasso Regression model is implemented by adding regularisation to the loss function and we compute the estimated vector of coefficients $\hat{\boldsymbol{{\beta}}}$ by:
+$$
+\min_{\boldsymbol{\beta}} \left\{ \frac{1}{2n} \sum_{i=1}^n (y_i - \boldsymbol{X}_i \boldsymbol{\beta})^2 + \lambda \sum_{j=1}^p |\beta_j| \right\},
+$$
+where $\boldsymbol{X}_i$ is the feature vector for $i_{th}$ country, $y_i$ is the observed happiness score for $i_{th}$ observation and $\lambda$ is the regularization parameter and determines the strength of the penalty. The hyperparameter $\lambda$ is tuned by a 10-fold cross validation and the optimal $\lambda$ is the one that mininmizes the cross-validation error.
+
+
+```{r lasso, echo=FALSE, include=FALSE}
+# predictor matrix
+X <- as.matrix(subset(train_set, select = -happiness_score))
+y <- train_set$happiness_score
+lasso_model <- cv.glmnet(X, y, alpha=1, nfolds=10)
+lambda_optimal <- lasso_model$lambda.min
+print(lambda_optimal)
+coef_lasso <- coef(lasso_model, lambda=lambda_optimal)
+print(coef_lasso)
+
+# test on test set
+test_X <- as.matrix(subset(test_set, select = -happiness_score))
+predictions <- predict(lasso_model, s=lambda_optimal, newx=test_X)
+```
+
+## Results
+The Lasso coefficients table shows that the generosity among population is not correlated to the happiness score and the coefficient is set to zero by the Lasso model. In particular, the social support offered to individuals indicates a strong positive effect on the happiness score of a country increasing the happiness score by around 1.5199 with one unit increase in this variable. All other variables also show positive correlations with the happiness score. The optimal $\lambda$ is 0.03191781.
+```{r result1, echo=FALSE}
+coefs_df <- data.frame(
+  Variable = c("Intercept", "GDP per Capita", "Social Support", 
+               "Healthy Life Expectancy", "Freedom to Make Life Choices", 
+               "Generosity", "Perceptions of Corruption"),
+  Coefficient = c(2.2116002, 0.2477033, 1.5198522, 0.7941452, 1.2378764, 0, 0.5727289)
+)
+
+# Using knitr to create a table
+knitr::kable(coefs_df, format = "markdown", caption = "Lasso Model Coefficients")
+lasso_mse <- mean((test_set$happiness_score - predictions)^2)
+test_lasso <- test_set%>%
+  mutate(predictions = predictions)
+plot_lasso <- ggplot(test_lasso, aes(x=happiness_score, y=predictions))+
+  geom_point(alpha=0.5)+
+  geom_abline(intercept=0, slope=1, linetype="dashed", color = "blue")+
+  labs(x="True happiness score", y="Predicted happiness score")+
+  theme_minimal()
+```
+
+## Random Forest
+Secondly, the Random Forest model is implemented as it can also model the nonlinearity presenting in the data. A Random Forest is composed of B decision trees $\{T_1, T_2,...,T_B\}$ and each decision tree is built from a bootstrap sample from the training data. For each node in each decision tree, the algorithm chooses the optimal split value s by:
+$$
+s = \underset{s}{\operatorname{argmin}} \left[ \min_{c_1, c_2} \left( \sum_{i \in {\mathcal{I}_1}} (y_i - c_1)^2 + \sum_{i \in {\mathcal{I}_2}} (y_i - c_2)^2 \right) \right],
+$$
+where $I_1$ and $I_2$ are the child nodes split by s, $c_1$ and $c_2$ are the mean responses for the left child nodes $I_1$ and right nodes $I_2$ respectively.
+
+In this model, we set the number of trees to 200. After tuning the hyperparameters and model construction, the predictions of the happiness score is made by:
+$$
+\hat{y} = \frac{1}{200}\sum_{b=1}^{200} \hat{y}_b, \quad \text{for the } b^{th} \text{ tree}.
+$$
+
+```{r randomforest, echo=FALSE}
+set.seed(17)
+random_forest <- randomForest(happiness_score ~., data = train_set, ntree=200, importance=TRUE)
+```
+
+# Results
+The Random Forest model explains 81.19% variance in the data suggesting a good fit and the mean squared error is 0.252. The histogram \ref{fig:feature} shows how much the mean squared error is increased if the value of the variable is rearranged while keeping other variables unchanged. It demonstrates the importance of each feature and the generosity appears to contribute the less to the happiness score predictions. Additionally, people's freedom to make life choices and the social support are the two predictors that the most likely to contribute to the accuracy of the model.
+
+```{r forestresults, echo=FALSE,fig.cap = "\\label{fig:feature} Feature Importance for Random Forest.", out.width='70%'}
+importance_rf <- importance(random_forest)
+var_importance <- data.frame(
+  Variables = rownames(importance_rf), Importance = importance_rf[, '%IncMSE']
+)
+var_importance %>%
+  ggplot(aes(x=reorder(Variables, Importance), y = Importance))+
+  geom_col(fill = "#006BA2", width = 0.6) +
+  coord_flip() +
+  labs(title="Feature Importance for Random Forest",
+       x="Features",
+       y="Increase in MSE")+
+  theme_minimal()+
+  theme(
+    axis.title.y = element_blank(),  # Removes the y-axis title
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank(),
+    axis.line.y.left = element_line(color = "black")
+  )+
+  scale_y_continuous(expand = c(0, 0))
+
+rf_predictions <- predict(random_forest, newdata=test_set)
+rf_mse <- mean((test_set$happiness_score - rf_predictions)^2)
+test_rf <- test_set%>%
+  mutate(predictions = rf_predictions)
+plot_rf <- ggplot(test_rf, aes(x=happiness_score, y=predictions))+
+  geom_point(alpha=0.5)+
+  geom_abline(intercept=0, slope=1, linetype="dashed", color = "blue")+
+  labs(x="True happiness score", y="Predicted happiness score")+
+  theme_minimal()
+```
+
+# K-Nearest_Neighbours Regression
+The third model we applied is the K-Nearest Neighbours regression, which makes predictions by taking the average of the happiness score outputs of the nearest points. Firstly, the hyperparameter $k$ is tuned by the 10-folds cross validation method within a range of $k$ values and $k=9$ was selected with the smallest root mean squared error. The distance between feature vectors $\boldsymbol{X}_i$ and $\boldsymbol{X}_j$ is Euclidean distance:
+$$
+d(\boldsymbol{X}_i,\boldsymbol{X}_j) = \sqrt{\sum_{k=1}^6 (x_{ik}-x_{jk})^2},
+$$
+where $k$ is the $k^{th}$ feature in the predictors. The predictions $\hat{y}$ of the happiness scores based six social and economic factors are made by:
+$$
+\hat{y}(\boldsymbol{x})=\frac{1}{9}\sum_{x_i\in N(\boldsymbol{x})}y_i,
+$$
+where $N(\boldsymbol{x})$ is the set of 9 nearest neighbours of $\boldsymbol{x}$.
+```{r knn, echo=FALSE}
+set.seed(20)
+train_control <- trainControl(method = "cv", number = 10)
+# Train the KNN model
+knn_model <- train(happiness_score ~ ., data = train_set, method = "knn",
+                   trControl = train_control, preProcess = "scale", tuneLength = 10)
+train_score <- train_set$happiness_score
+knn_result <- knn(train = train_set, test = test_set, cl = train_score, k = 9)
+
+```
+
+```{r knnresult, echo=FALSE}
+knn_predictions <- as.numeric(levels(knn_result)[knn_result])
+knn_mse <- mean((test_set$happiness_score - knn_predictions)^2)
+print(knn_mse)
+test_knn <- test_set%>%
+  mutate(predictions = knn_predictions)
+plot_knn <- ggplot(test_knn, aes(x=happiness_score, y=predictions))+
+  geom_point(alpha=0.5)+
+  geom_abline(intercept=0, slope=1, linetype="dashed", color = "blue")+
+  labs(x="True happiness score", y="Predicted happiness score")+
+  theme_minimal()
+```
+The K-Nearest Neighbours model show a much smaller mean squared error of 0.0657 compared to Lasso Regression and Random Forest (0.309, 0.252) indicating a very good fit to the world happiness dataset from 2022 to 2024.
+
+## Results for Three models
+Figure \ref{fig:pred} shows the predictions of the happiness scores from the three models versus the true happiness scores in the test set. The dashed line $y=x$ is used to identify the fit of each model. All three models show a good fit to the data while the KNN model with $k=9%$ indicates an outstanding predictions on the test set.
+```{r plot, echo=FALSE,fig.cap = "\\label{fig:pred} Predictions and the True Happiness Scores", out.width='70%',message=FALSE, warning=FALSE}
+combined_plot <- grid.arrange(plot_lasso, plot_rf, plot_knn, ncol = 3)
+print(combined_plot)
+```
+# Conclusion
+Although there appears to have some small fluctuations in the happiness scores from year to year from our analysis of the World Happiness Report from 2022 to 2024, years does not mainly relate to the happiness score of each country. It can also be concluded that the K-Nearest Neighbours model performs clearly better in predicting the happiness scores based on six main features than the Lasso Regression model and the Random Forest model. From the feature importance demonstronstrated from the Lasso Regression and the Random Forest model, both show that the freedom that people make life choices and the social support contribute the most to the accuracy of the predictions in happiness scores. However, the generosity of people tends to be the personal characteristics rather than the features related to the extent of happiness in a country.
+
+## Future work
+In the process of exploratory data analysis, it can be noticed that different regions show quite different happiness scores. In addition to the six social factors we investigated in the report, more features like geographical features, weather, infrastructure of a country can also be collected to model the happiness scores. In terms of the model construction, there are various hyperparameters in the Random Forest such as the number of forests, the minimum leaves at each node can be further tuned to reach better prediction results. interaction term
+
